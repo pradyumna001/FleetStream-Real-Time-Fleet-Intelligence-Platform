@@ -1,0 +1,64 @@
+version: 2
+
+sources:
+  - name: silver
+    description: >-
+      Validated, deduplicated and enriched telemetry written by the Spark streaming
+      job. This is dbt's entry point: everything upstream of it is the streaming
+      platform's responsibility, everything downstream is modelling.
+    database: "{{ env_var('TRINO_CATALOG', 'iceberg') }}"
+    schema: silver
+
+    tables:
+      - name: telemetry
+        description: "One row per validated telemetry reading. GRAIN: event."
+        # Freshness is the earliest signal that the streaming layer has stalled -
+        # long before any dashboard looks obviously wrong.
+        loaded_at_field: processed_at
+        freshness:
+          warn_after: {count: 30, period: minute}
+          error_after: {count: 2, period: hour}
+        columns:
+          - name: event_id
+            description: Deterministic unique identifier; the platform's idempotency key.
+            data_tests:
+              - not_null
+              - unique
+          - name: vehicle_id
+            data_tests: [not_null]
+          - name: event_time
+            data_tests: [not_null]
+          - name: trip_id
+            data_tests: [not_null]
+
+      - name: telemetry_quarantine
+        description: >-
+          Records rejected by the quality rules, with the rule and reason. Modelled
+          so data quality is reportable in the same warehouse as the business data,
+          rather than only visible in logs.
+
+      - name: dim_vehicle
+        description: Vehicle reference data.
+        columns:
+          - name: vehicle_id
+            data_tests: [not_null, unique]
+
+      - name: dim_driver
+        description: Driver reference data.
+        columns:
+          - name: driver_id
+            data_tests: [not_null, unique]
+
+      - name: dim_route
+        description: Route reference data.
+        columns:
+          - name: route_id
+            data_tests: [not_null, unique]
+
+  - name: platform
+    description: Operational tables produced by the pipeline itself.
+    database: "{{ env_var('TRINO_CATALOG', 'iceberg') }}"
+    schema: platform
+    tables:
+      - name: reconciliation
+        description: Per-run source/duplicate/rejected/output counters.

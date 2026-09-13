@@ -1,0 +1,20 @@
+# Build context hygiene. Without this, dbt's target/ and logs/ directories and every
+# __pycache__ are copied into images, bloating them and invalidating layer caches on
+# every local run.
+.git
+.github
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.venv
+venv
+dbt/fleetstream/target
+dbt/fleetstream/logs
+dbt/fleetstream/.user.yml
+terraform/**/.terraform
+terraform/**/*.tfstate*
+docs
+*.md
+!README.md

@@ -1,0 +1,277 @@
+# Spark standalone cluster plus the streaming jobs.  Profile: stream
+#
+# A standalone cluster rather than local[*] per job, because resource contention
+# between concurrent streaming queries is a real operational concern and this makes
+# it visible. Each application therefore declares spark.cores.max explicitly: the
+# standalone scheduler's default is to hand the first application every core in the
+# cluster, which would starve the queries that start after it.
+#
+# Sizing targets a laptop. Raise SPARK_WORKER_CORES / _MEMORY if you have headroom.
+
+name: fleetstream
+
+x-spark-env: &spark-env
+  KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+  TELEMETRY_TOPIC: ${TELEMETRY_TOPIC:-fleet.telemetry}
+  INCIDENTS_TOPIC: ${INCIDENTS_TOPIC:-fleet.incidents}
+  DLQ_TOPIC: ${DLQ_TOPIC:-fleet.telemetry.dlq}
+  S3_ENDPOINT: http://minio:9000
+  S3_ACCESS_KEY: ${S3_ACCESS_KEY:-fleetstream}
+  S3_SECRET_KEY: ${S3_SECRET_KEY:-fleetstream-local-secret}
+  S3_REGION: ${S3_REGION:-us-east-1}
+  WAREHOUSE_BUCKET: ${WAREHOUSE_BUCKET:-fleetstream}
+  ICEBERG_REST_URI: http://iceberg-rest:8181
+  CATALOG_NAME: ${CATALOG_NAME:-fleetstream}
+  CHECKPOINT_ROOT: s3a://${WAREHOUSE_BUCKET:-fleetstream}/checkpoints
+  AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-fleetstream}
+  AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-fleetstream-local-secret}
+  AWS_REGION: ${S3_REGION:-us-east-1}
+  # PYTHONPATH is deliberately NOT set here. The image sets it to include the
+  # bundled PySpark and py4j zips as well as the application source; overriding
+  # it from compose silently drops pyspark from sys.path for anything not
+  # launched via spark-submit, such as the integration tests.
+
+x-spark-build: &spark-build
+  build:
+    context: ..
+    dockerfile: docker/spark/Dockerfile
+  image: fleetstream/spark:3.5.9
+
+x-spark-deps: &spark-deps
+  kafka:
+    condition: service_healthy
+  iceberg-rest:
+    condition: service_healthy
+
+services:
+  spark-master:
+    <<: *spark-build
+    container_name: fleetstream-spark-master
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    environment:
+      <<: *spark-env
+      SPARK_NO_DAEMONIZE: "true"
+    ports:
+      - "8080:8080"   # master UI
+      - "7077:7077"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080 >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    profiles: [stream]
+    networks: [fleetstream]
+
+  spark-worker:
+    <<: *spark-build
+    container_name: fleetstream-spark-worker
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    environment:
+      <<: *spark-env
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-6}
+      SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-5G}
+    ports:
+      - "8081:8081"   # worker UI
+    volumes:
+      # Executors write checkpoint state here too, so they need the same volume
+      # as the drivers. A named volume gives ext4 semantics inside the WSL2 VM;
+      # a Windows bind mount would not provide atomic rename and would corrupt state.
+      - spark-checkpoints:/checkpoints
+    profiles: [stream]
+    networks: [fleetstream]
+
+  # One-shot: creates namespaces and tables, then writes and reads back a row.
+  # This is the Phase 1 exit criterion - proof the catalog, MinIO and Spark agree.
+  spark-bootstrap:
+    <<: *spark-build
+    container_name: fleetstream-spark-bootstrap
+    depends_on: *spark-deps
+    environment: *spark-env
+    volumes:
+      - spark-checkpoints:/checkpoints
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - local[2]
+      - --driver-memory
+      - 1g
+      - /opt/fleetstream/src/fleetstream/jobs/bootstrap_catalog.py
+    profiles: [bootstrap]
+    restart: "no"
+    networks: [fleetstream]
+
+  # Loads the vehicle/driver/route dimensions. Separate from bootstrap because
+  # bootstrap creates structure while this loads content, and re-seeding is a
+  # routine act (the dimension source changed) whereas re-bootstrapping is not.
+  spark-seed:
+    <<: *spark-build
+    container_name: fleetstream-spark-seed
+    depends_on: *spark-deps
+    environment: *spark-env
+    volumes:
+      - spark-checkpoints:/checkpoints
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - local[2]
+      - --driver-memory
+      - 1g
+      - /opt/fleetstream/src/fleetstream/jobs/seed_dimensions.py
+    profiles: [bootstrap]
+    restart: "no"
+    networks: [fleetstream]
+
+  # Runs the end-to-end assertion suite.
+  spark-verify:
+    <<: *spark-build
+    container_name: fleetstream-spark-verify
+    depends_on: *spark-deps
+    environment: *spark-env
+    volumes:
+      - spark-checkpoints:/checkpoints
+      - sim-manifests:/manifests
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - local[2]
+      - --driver-memory
+      - 1500m
+      - /opt/fleetstream/src/fleetstream/jobs/verify.py
+    profiles: [verify]
+    restart: "no"
+    networks: [fleetstream]
+
+  # Iceberg table maintenance: compaction and snapshot expiry.
+  spark-maintenance:
+    <<: *spark-build
+    container_name: fleetstream-spark-maintenance
+    depends_on: *spark-deps
+    environment: *spark-env
+    volumes:
+      - spark-checkpoints:/checkpoints
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - local[2]
+      - --driver-memory
+      - 1g
+      - /opt/fleetstream/src/fleetstream/maintenance/table_maintenance.py
+    profiles: [maintenance]
+    restart: "no"
+    networks: [fleetstream]
+
+  bronze-ingest:
+    <<: *spark-build
+    container_name: fleetstream-bronze-ingest
+    depends_on:
+      spark-master:
+        condition: service_healthy
+      spark-worker:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+      iceberg-rest:
+        condition: service_healthy
+    environment: *spark-env
+    volumes:
+      - spark-checkpoints:/checkpoints
+    ports:
+      - "4040:4040"   # driver UI + /metrics/prometheus
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - spark://spark-master:7077
+      - --name
+      - fleetstream-bronze-ingest
+      - --driver-memory
+      - 768m
+      - --executor-memory
+      - 1g
+      - --conf
+      - spark.cores.max=2
+      - --conf
+      - spark.ui.port=4040
+      - /opt/fleetstream/src/fleetstream/streaming/bronze_ingest.py
+    profiles: [stream]
+    networks: [fleetstream]
+
+  silver-transform:
+    <<: *spark-build
+    container_name: fleetstream-silver-transform
+    depends_on:
+      spark-master:
+        condition: service_healthy
+      spark-worker:
+        condition: service_started
+      iceberg-rest:
+        condition: service_healthy
+    environment: *spark-env
+    volumes:
+      - spark-checkpoints:/checkpoints
+    ports:
+      - "4041:4041"
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - spark://spark-master:7077
+      - --name
+      - fleetstream-silver-transform
+      - --driver-memory
+      - 768m
+      - --executor-memory
+      - 1g
+      - --conf
+      - spark.cores.max=2
+      - --conf
+      - spark.ui.port=4041
+      - /opt/fleetstream/src/fleetstream/streaming/silver_transform.py
+    profiles: [stream]
+    networks: [fleetstream]
+
+  incident-detector:
+    <<: *spark-build
+    container_name: fleetstream-incident-detector
+    depends_on:
+      spark-master:
+        condition: service_healthy
+      spark-worker:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+    environment: *spark-env
+    volumes:
+      - spark-checkpoints:/checkpoints
+    ports:
+      - "4042:4042"
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - spark://spark-master:7077
+      - --name
+      - fleetstream-incident-detector
+      - --driver-memory
+      - 512m
+      - --executor-memory
+      - 768m
+      - --conf
+      - spark.cores.max=1
+      - --conf
+      - spark.ui.port=4042
+      - /opt/fleetstream/src/fleetstream/streaming/incident_detector.py
+    profiles: [stream]
+    networks: [fleetstream]
+
+volumes:
+  spark-checkpoints:
+  # Also declared in the base file; compose merges the two definitions into one
+  # volume, which is how the verify job reads the manifest the simulator wrote.
+  sim-manifests:
+
+networks:
+  fleetstream:
+    name: fleetstream

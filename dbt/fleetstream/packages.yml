@@ -1,0 +1,6 @@
+packages:
+  # Used for generate_surrogate_key, which gives incremental models a deterministic
+  # merge key. Without a stable key, reprocessing a lookback window would insert
+  # duplicates instead of updating rows.
+  - package: dbt-labs/dbt_utils
+    version: [">=1.3.0", "<2.0.0"]

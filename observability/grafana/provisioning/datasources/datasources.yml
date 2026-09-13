@@ -1,0 +1,29 @@
+apiVersion: 1
+
+# Two datasources for two audiences, both provisioned so the stack comes up ready
+# to use rather than requiring anyone to click through a setup wizard.
+datasources:
+  # Platform health: consumer lag, batch duration, throughput.
+  - name: Prometheus
+    type: prometheus
+    uid: fleetstream-prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 15s
+
+  # Business intelligence, queried straight off the Gold Iceberg tables. This is the
+  # BI layer: no extract, no copy, no separate warehouse - Grafana reads the same
+  # lakehouse Spark writes.
+  - name: Trino
+    type: trino-datasource
+    uid: fleetstream-trino
+    access: proxy
+    url: http://trino:8080
+    isDefault: false
+    jsonData:
+      server: http://trino:8080
+      catalog: iceberg
+      schema: gold
+      user: fleetstream

@@ -1,0 +1,251 @@
+{
+  "uid": "fleetstream-platform",
+  "title": "FleetStream — Platform Health",
+  "tags": ["fleetstream", "platform"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "editable": true,
+  "description": "Is the pipeline keeping up? Consumer lag is the first thing to read: a lag that grows monotonically means arrival rate exceeds processing rate, and every other symptom follows from that.",
+  "panels": [
+    {
+      "type": "row",
+      "title": "Kafka — is the pipeline keeping up?",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "type": "stat",
+      "title": "Total consumer lag",
+      "description": "Absolute lag matters less than its direction. A large but shrinking backlog is a system recovering correctly.",
+      "datasource": { "type": "prometheus", "uid": "fleetstream-prometheus" },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 50000 },
+              { "color": "red", "value": 500000 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "area"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(kafka_consumergroup_lag)",
+          "legendFormat": "total lag"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Consumer lag by partition",
+      "description": "One line far above the others is a hot partition. Adding consumers cannot fix it: a partition is consumed by exactly one member of a group.",
+      "datasource": { "type": "prometheus", "uid": "fleetstream-prometheus" },
+      "gridPos": { "h": 6, "w": 18, "x": 6, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "fillOpacity": 10, "showPoints": "never", "lineWidth": 1 }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (partition) (kafka_consumergroup_lag{topic=\"fleet.telemetry\"})",
+          "legendFormat": "partition {{partition}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Lag growth rate",
+      "description": "The derivative of lag. Sustained positive values mean the system is falling behind; this is what the KafkaConsumerLagGrowing alert fires on.",
+      "datasource": { "type": "prometheus", "uid": "fleetstream-prometheus" },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 7 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "fillOpacity": 10, "showPoints": "never", "lineWidth": 1 }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(deriv(kafka_consumergroup_lag[10m]))",
+          "legendFormat": "lag growth (msg/s)"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Messages produced per second",
+      "description": "Arrival rate into the telemetry topic.",
+      "datasource": { "type": "prometheus", "uid": "fleetstream-prometheus" },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 7 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "fillOpacity": 10, "showPoints": "never", "lineWidth": 1 }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(kafka_topic_partition_current_offset{topic=\"fleet.telemetry\"}[5m]))",
+          "legendFormat": "produced/s"
+        }
+      ]
+    },
+    {
+      "type": "bargauge",
+      "title": "Partition skew — messages per partition",
+      "description": "The simulator sends one vehicle 25x the traffic of the others. Because vehicle_id is the partition key, that vehicle's partition is visibly deeper than the rest.",
+      "datasource": { "type": "prometheus", "uid": "fleetstream-prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 13 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "continuous-GrYlRd" } },
+        "overrides": []
+      },
+      "options": { "orientation": "horizontal", "displayMode": "gradient", "showUnfilled": true },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (partition) (kafka_topic_partition_current_offset{topic=\"fleet.telemetry\"})",
+          "legendFormat": "p{{partition}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Spark — is processing healthy?",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 21 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Streaming input rate by query",
+      "description": "Rows entering each streaming query. Matched by regex because Spark embeds the application id in the metric name, which changes on every restart.",
+      "datasource": { "type": "prometheus", "uid": "fleetstream-prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 22 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "fillOpacity": 10, "showPoints": "never", "lineWidth": 1 }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{__name__=~\"metrics_.*_driver_spark_streaming_.*_inputRate_total_Value\"}",
+          "legendFormat": "{{query}} input"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Streaming processing rate by query",
+      "description": "Rows processed per second. When this sits below the input rate, lag grows — the two panels should be read together.",
+      "datasource": { "type": "prometheus", "uid": "fleetstream-prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 22 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "fillOpacity": 10, "showPoints": "never", "lineWidth": 1 }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{__name__=~\"metrics_.*_driver_spark_streaming_.*_processingRate_total_Value\"}",
+          "legendFormat": "{{query}} processed"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Micro-batch latency",
+      "description": "A batch taking longer than its trigger interval can never catch up: the next batch is due before this one finishes.",
+      "datasource": { "type": "prometheus", "uid": "fleetstream-prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 29 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": { "fillOpacity": 10, "showPoints": "never", "lineWidth": 1 }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{__name__=~\"metrics_.*_driver_spark_streaming_.*_latency_Value\"}",
+          "legendFormat": "{{query}} latency"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Deduplication state rows",
+      "description": "How many event_ids the watermark is currently holding. Unbounded growth here means the watermark is not advancing, which is the classic streaming-state leak.",
+      "datasource": { "type": "prometheus", "uid": "fleetstream-prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 29 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "fillOpacity": 10, "showPoints": "never", "lineWidth": 1 }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{__name__=~\"metrics_.*_driver_spark_streaming_.*_states_rowsTotal_Value\"}",
+          "legendFormat": "{{query}} state rows"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Component availability",
+      "description": "Scrape health per component. A Spark query that stops reporting has usually died rather than gone quiet.",
+      "datasource": { "type": "prometheus", "uid": "fleetstream-prometheus" },
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 36 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background"
+      },
+      "targets": [
+        { "refId": "A", "expr": "up", "legendFormat": "{{job}}", "instant": true }
+      ]
+    }
+  ]
+}

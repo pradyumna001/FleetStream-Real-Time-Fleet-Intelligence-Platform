@@ -1,0 +1,39 @@
+# Two targets against the same models.
+#
+# `trino` is the active one and is what the local stack runs. Trino is used as the
+# Athena stand-in: both are Presto-derived and share a SQL dialect, so the models
+# here move to Athena without rewriting.
+#
+# `snowflake` is defined but not exercised. Switching serving engines should be a
+# profile change, not a modelling change, and keeping the target here makes that
+# claim concrete. It is untested - there is no Snowflake account behind it - so it
+# is documented as a starting point rather than presented as working.
+
+fleetstream:
+  target: "{{ env_var('DBT_TARGET', 'trino') }}"
+  outputs:
+    trino:
+      type: trino
+      method: none          # no auth on the local cluster
+      user: "{{ env_var('TRINO_USER', 'fleetstream') }}"
+      host: "{{ env_var('TRINO_HOST', 'trino') }}"
+      port: "{{ env_var('TRINO_PORT', '8080') | int }}"
+      catalog: "{{ env_var('TRINO_CATALOG', 'iceberg') }}"
+      schema: gold
+      threads: 4
+      http_scheme: http
+      # Trino cannot roll back DDL, so dbt must not try.
+      retries: 3
+      timezone: UTC
+
+    snowflake:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT', '') }}"
+      user: "{{ env_var('SNOWFLAKE_USER', '') }}"
+      password: "{{ env_var('SNOWFLAKE_PASSWORD', '') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE', 'FLEETSTREAM_TRANSFORMER') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE', 'FLEETSTREAM_WH') }}"
+      database: "{{ env_var('SNOWFLAKE_DATABASE', 'FLEETSTREAM') }}"
+      schema: GOLD
+      threads: 8
+      client_session_keep_alive: false

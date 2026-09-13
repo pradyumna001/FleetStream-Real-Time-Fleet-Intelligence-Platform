@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars and fill in real values before any apply.
+# The defaults in variables.tf are deliberately invalid placeholders so that an
+# accidental apply fails fast rather than creating resources in the wrong network.
+
+region      = "ap-south-1"
+environment = "dev"
+bucket_name = "fleetstream-lakehouse-dev-CHANGEME"
+
+vpc_id                 = "vpc-0123456789abcdef0"
+subnet_ids             = ["subnet-aaa", "subnet-bbb", "subnet-ccc"]
+msk_security_group_ids = ["sg-0123456789abcdef0"]

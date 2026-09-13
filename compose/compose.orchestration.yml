@@ -1,0 +1,198 @@
+# Airflow orchestration and the dbt runner.  Profile: orchestrate
+#
+# Airflow here is a scheduler, not a processing engine. Every heavy task runs in its
+# own container launched through the Docker API, so the scheduler stays small and a
+# runaway transformation cannot take Airflow down with it.
+#
+# This is the heaviest overlay (Airflow plus Postgres is roughly 2 GB), which is why
+# it sits behind its own profile.
+
+name: fleetstream
+
+x-airflow-common: &airflow-common
+  build:
+    context: ..
+    dockerfile: docker/airflow/Dockerfile
+  image: fleetstream/airflow:3.3.1
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db:5432/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__FERNET_KEY: ""
+    # Deterministic key so restarts do not invalidate stored connections.
+    AIRFLOW__API__SECRET_KEY: fleetstream-local-not-a-secret
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    AIRFLOW__SCHEDULER__CATCHUP_BY_DEFAULT: "false"
+    # --- Authentication ---------------------------------------------------
+    # Airflow 3 replaced `airflow users create` with an auth manager. The
+    # default SimpleAuthManager generates a RANDOM password on first start and
+    # writes it inside the container, so it changes whenever the container is
+    # recreated - useless for a stack you are meant to be able to log into.
+    #
+    # Declaring the user here and seeding the password file on a shared volume
+    # makes login deterministic: SimpleAuthManager only fills in users MISSING
+    # from that file, so a seeded entry is left alone.
+    #
+    # SimpleAuthManager is dev-only by design - it stores passwords in
+    # plaintext. Fine locally, and exactly why production would use the FAB or
+    # Keycloak auth manager instead.
+    AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin}
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "admin:admin"
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/auth/passwords.json
+    # The DAGs launch sibling containers, so they need to know the compose network
+    # and the project paths on the HOST (the Docker daemon resolves bind mounts
+    # against the host filesystem, not against Airflow's container).
+    FLEETSTREAM_NETWORK: fleetstream
+    FLEETSTREAM_PROJECT_DIR: ${FLEETSTREAM_PROJECT_DIR:-..}
+    TRINO_HOST: trino
+    TRINO_PORT: "8080"
+    TRINO_USER: fleetstream
+    TRINO_CATALOG: iceberg
+    ICEBERG_REST_URI: http://iceberg-rest:8181
+    KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+  volumes:
+    - ../airflow/dags:/opt/airflow/dags:ro
+    - airflow-logs:/opt/airflow/logs
+    # Must be writable: SimpleAuthManager opens the password file in append
+    # mode and takes an flock on it, so a read-only mount fails at startup.
+    - airflow-auth:/opt/airflow/auth
+    # The Docker socket is what lets Airflow start sibling containers. This grants
+    # effective root on the host, which is acceptable for a local demo and is exactly
+    # why production would use the Kubernetes executor or a remote worker pool instead.
+    - /var/run/docker.sock:/var/run/docker.sock
+  user: "50000:0"
+  depends_on:
+    airflow-db:
+      condition: service_healthy
+  networks: [fleetstream]
+
+services:
+  airflow-db:
+    image: postgres:16-alpine
+    container_name: fleetstream-airflow-db
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    profiles: [orchestrate]
+    networks: [fleetstream]
+
+  # Docker creates named volumes owned by root, but the Airflow containers run as
+  # uid 50000, so they cannot write the password file into it. This hands the volume
+  # over first. Same pattern as the Iceberg catalog volume in the base compose file.
+  airflow-auth-init:
+    image: alpine:3
+    container_name: fleetstream-airflow-auth-init
+    command: ["sh", "-c", "mkdir -p /auth && chown -R 50000:0 /auth && chmod 775 /auth && echo 'auth volume ready'"]
+    volumes:
+      - airflow-auth:/auth
+    networks: [fleetstream]
+    restart: "no"
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: fleetstream-airflow-init
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+      airflow-auth-init:
+        condition: service_completed_successfully
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        airflow db migrate
+        # `airflow users create` was REMOVED in Airflow 3 - it raises
+        # AttributeError: 'AirflowSecurityManagerV2' has no attribute 'find_role'.
+        # Airflow 3 takes credentials through the auth manager instead, so seed
+        # the SimpleAuthManager password file.
+        mkdir -p /opt/airflow/auth
+        if [ ! -s /opt/airflow/auth/passwords.json ]; then
+          printf '{"admin": "%s"}' "${AIRFLOW_ADMIN_PASSWORD:-admin}" > /opt/airflow/auth/passwords.json
+          echo "seeded admin password"
+        else
+          echo "password file already present, leaving it alone"
+        fi
+        echo "airflow initialised"
+    profiles: [orchestrate]
+    restart: "no"
+
+  airflow-apiserver:
+    <<: *airflow-common
+    container_name: fleetstream-airflow-apiserver
+    command: api-server
+    ports:
+      - "8082:8080"
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/api/v2/version"]
+      interval: 15s
+      timeout: 10s
+      retries: 15
+      start_period: 60s
+    profiles: [orchestrate]
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: fleetstream-airflow-scheduler
+    command: scheduler
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    profiles: [orchestrate]
+
+  # Airflow 3 parses DAGs in a SEPARATE process from the scheduler. Without this
+  # service the scheduler runs happily and simply never discovers a DAG - the
+  # symptom is `airflow dags list` returning "No data found" with no error anywhere.
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: fleetstream-airflow-dag-processor
+    command: dag-processor
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    profiles: [orchestrate]
+
+  # dbt runner. Normally invoked on demand (`make dbt`) or by Airflow through the
+  # Docker API, not left running.
+  dbt:
+    build:
+      context: ..
+      dockerfile: docker/dbt/Dockerfile
+    image: fleetstream/dbt:1.12.4
+    container_name: fleetstream-dbt
+    environment:
+      DBT_TARGET: trino
+      TRINO_HOST: trino
+      TRINO_PORT: "8080"
+      TRINO_USER: fleetstream
+      TRINO_CATALOG: iceberg
+    profiles: [orchestrate, dbt]
+    restart: "no"
+    networks: [fleetstream]
+
+volumes:
+  airflow-db-data:
+  airflow-logs:
+  airflow-auth:
+
+networks:
+  fleetstream:
+    name: fleetstream

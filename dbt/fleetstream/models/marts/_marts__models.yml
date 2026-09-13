@@ -1,0 +1,192 @@
+version: 2
+
+# Each fact declares its grain in prose AND enforces it with a uniqueness test.
+# A documented grain that nothing checks is a comment; the test is what stops a
+# duplicate merge key or a bad join from silently doubling every measure.
+#
+# Generic test arguments are nested under `arguments:` as dbt 1.12 requires.
+
+models:
+  - name: dim_vehicle
+    description: "GRAIN: one row per vehicle."
+    columns:
+      - name: vehicle_id
+        data_tests: [not_null, unique]
+      - name: consumption_band
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['efficient', 'standard', 'heavy']
+
+  - name: dim_driver
+    description: "GRAIN: one row per driver."
+    columns:
+      - name: driver_id
+        data_tests: [not_null, unique]
+      - name: risk_band
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['cautious', 'normal', 'aggressive']
+
+  - name: dim_route
+    description: "GRAIN: one row per route."
+    columns:
+      - name: route_id
+        data_tests: [not_null, unique]
+      - name: haul_type
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['short_haul', 'medium_haul', 'long_haul']
+
+  - name: dim_date
+    description: "GRAIN: one row per calendar day."
+    columns:
+      - name: date_key
+        data_tests: [not_null, unique]
+
+  - name: fact_telemetry
+    description: >-
+      GRAIN: one row per telemetry reading. Roughly a thousand rows per trip -
+      never join this directly to fact_trip and aggregate a trip measure.
+    columns:
+      - name: event_id
+        description: "Idempotency key, and the incremental merge key."
+        data_tests: [not_null, unique]
+      - name: vehicle_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_vehicle')
+                field: vehicle_id
+      - name: driver_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_driver')
+                field: driver_id
+      - name: event_time
+        data_tests: [not_null]
+      - name: speed_kmh
+        description: >-
+          Silver quarantines anything outside 0-200, so a violation here means the
+          quality gate was bypassed rather than that a truck went faster.
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 200
+      - name: fuel_level_pct
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 100
+      - name: battery_level_pct
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 100
+
+  - name: fact_trip
+    description: "GRAIN: one row per trip."
+    columns:
+      - name: trip_id
+        data_tests: [not_null, unique]
+      - name: vehicle_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_vehicle')
+                field: vehicle_id
+      - name: distinct_vehicles
+        description: >-
+          Must always be 1. A trip spanning two vehicles would mean trip_id is not
+          the key we think it is, and every per-trip measure would be wrong.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [1]
+                quote: false
+      - name: duration_seconds
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                inclusive: true
+      - name: fuel_consumed_pct
+        description: >-
+          Fuel cannot rise during a trip - refuelling happens only while parked -
+          so this must never be negative. A negative value means either a bad
+          reading or that trip boundaries have been mis-assigned.
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                inclusive: true
+              config:
+                severity: warn
+
+  - name: fact_vehicle_daily
+    description: "GRAIN: one row per vehicle per day."
+    data_tests:
+      # The composite natural key behind the surrogate. Testing both proves the
+      # surrogate is unique for the right reason rather than by accident.
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [vehicle_id, event_date]
+    columns:
+      - name: vehicle_day_key
+        data_tests: [not_null, unique]
+      - name: vehicle_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_vehicle')
+                field: vehicle_id
+      - name: total_distance_km
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                inclusive: true
+      - name: utilisation_pct
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 100
+                inclusive: true
+
+  - name: fact_driver_incident
+    description: "GRAIN: one row per detected incident."
+    columns:
+      - name: incident_id
+        data_tests: [not_null, unique]
+      - name: incident_type
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - engine_critical_overheat
+                  - engine_overheat
+                  - severe_overspeed
+                  - overspeed
+                  - low_fuel
+      - name: severity
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['critical', 'high', 'medium', 'low']
+      - name: vehicle_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_vehicle')
+                field: vehicle_id

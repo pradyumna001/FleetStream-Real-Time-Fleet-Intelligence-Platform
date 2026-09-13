@@ -1,0 +1,274 @@
+{
+  "uid": "fleetstream-business",
+  "title": "FleetStream — Fleet Intelligence",
+  "tags": ["fleetstream", "business"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5m",
+  "time": { "from": "now-7d", "to": "now" },
+  "editable": true,
+  "description": "The business questions the platform exists to answer, queried straight off the Gold Iceberg tables through Trino. No extract and no copy: this is the same data Spark wrote.",
+  "panels": [
+    {
+      "type": "row",
+      "title": "Fleet overview",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "type": "stat",
+      "title": "Active vehicles today",
+      "datasource": { "type": "trino-datasource", "uid": "fleetstream-trino" },
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT active_vehicles FROM iceberg.gold.fleet_daily_summary ORDER BY event_date DESC LIMIT 1"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Trips today",
+      "datasource": { "type": "trino-datasource", "uid": "fleetstream-trino" },
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT total_trips FROM iceberg.gold.fleet_daily_summary ORDER BY event_date DESC LIMIT 1"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Distance today (km)",
+      "datasource": { "type": "trino-datasource", "uid": "fleetstream-trino" },
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "lengthkm", "decimals": 0 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT total_distance_km FROM iceberg.gold.fleet_daily_summary ORDER BY event_date DESC LIMIT 1"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Fleet L/100km",
+      "datasource": { "type": "trino-datasource", "uid": "fleetstream-trino" },
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 1 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT fleet_l_per_100km FROM iceberg.gold.fleet_daily_summary ORDER BY event_date DESC LIMIT 1"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Incidents today",
+      "datasource": { "type": "trino-datasource", "uid": "fleetstream-trino" },
+      "gridPos": { "h": 5, "w": 4, "x": 16, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "red", "value": 200 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT total_incidents FROM iceberg.gold.fleet_daily_summary ORDER BY event_date DESC LIMIT 1"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Avg utilisation %",
+      "datasource": { "type": "trino-datasource", "uid": "fleetstream-trino" },
+      "gridPos": { "h": 5, "w": 4, "x": 20, "y": 1 },
+      "fieldConfig": { "defaults": { "unit": "percent", "decimals": 1 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT avg_utilisation_pct FROM iceberg.gold.fleet_daily_summary ORDER BY event_date DESC LIMIT 1"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Daily distance and fuel",
+      "datasource": { "type": "trino-datasource", "uid": "fleetstream-trino" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "fieldConfig": {
+        "defaults": { "custom": { "fillOpacity": 15, "lineWidth": 2, "showPoints": "auto" } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "rawSQL": "SELECT CAST(event_date AS timestamp) AS time, total_distance_km, total_fuel_consumed_l FROM iceberg.gold.fleet_daily_summary ORDER BY event_date"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Daily incidents by type",
+      "datasource": { "type": "trino-datasource", "uid": "fleetstream-trino" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "fieldConfig": {
+        "defaults": { "custom": { "fillOpacity": 15, "lineWidth": 2, "stacking": { "mode": "normal" } } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "rawSQL": "SELECT CAST(event_date AS timestamp) AS time, overheat_incidents, overspeed_incidents, low_fuel_incidents FROM iceberg.gold.fleet_daily_summary ORDER BY event_date"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Vehicle health — which vehicles need maintenance?",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "collapsed": false
+    },
+    {
+      "type": "table",
+      "title": "Maintenance shortlist",
+      "description": "Vehicles flagged by a rule an operator can read and check, not by an opaque score.",
+      "datasource": { "type": "trino-datasource", "uid": "fleetstream-trino" },
+      "gridPos": { "h": 9, "w": 14, "x": 0, "y": 15 },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto" } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "max_engine_temperature_c" },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": { "type": "color-background", "mode": "gradient" }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "orange", "value": 100 },
+                    { "color": "red", "value": 115 }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT vehicle_id, vehicle_description, region, max_engine_temperature_c, overheat_event_count, total_incidents, round(consumption_vs_rated_ratio, 2) AS fuel_vs_rated FROM iceberg.gold.vehicle_performance WHERE needs_maintenance_review ORDER BY overheat_event_count DESC, max_engine_temperature_c DESC LIMIT 25"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Overheating incidents yesterday",
+      "description": "The section 65 business query, answered from the Gold layer.",
+      "datasource": { "type": "trino-datasource", "uid": "fleetstream-trino" },
+      "gridPos": { "h": 9, "w": 10, "x": 14, "y": 15 },
+      "fieldConfig": { "defaults": { "custom": { "align": "auto" } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT vehicle_id, count(*) AS overheating_events FROM iceberg.gold.fact_driver_incident WHERE incident_type IN ('engine_overheat', 'engine_critical_overheat') AND event_date = current_date - interval '1' day GROUP BY vehicle_id ORDER BY overheating_events DESC LIMIT 20"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Drivers and routes",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+      "collapsed": false
+    },
+    {
+      "type": "table",
+      "title": "Driver behaviour — normalised per 100 km",
+      "description": "Rates rather than counts, so a driver who simply drives further is not ranked as worse.",
+      "datasource": { "type": "trino-datasource", "uid": "fleetstream-trino" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 25 },
+      "fieldConfig": { "defaults": { "custom": { "align": "auto" } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT driver_name, driver_category, risk_band, total_trips, round(total_distance_km, 0) AS distance_km, overspeed_events_per_100km, l_per_100km FROM iceberg.gold.driver_performance WHERE total_trips >= 3 ORDER BY overspeed_events_per_100km DESC LIMIT 25"
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Route reliability",
+      "description": "The gap between median and p95 duration is what makes a route unreliable — an average hides it completely.",
+      "datasource": { "type": "trino-datasource", "uid": "fleetstream-trino" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 25 },
+      "fieldConfig": { "defaults": { "custom": { "align": "auto" } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT route_name, haul_type, total_trips, median_duration_minutes, p95_duration_minutes, duration_spread_minutes, avg_l_per_100km FROM iceberg.gold.route_performance ORDER BY duration_spread_minutes DESC"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Data quality",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 },
+      "collapsed": false
+    },
+    {
+      "type": "table",
+      "title": "Rejections by rule",
+      "description": "Which quality rule is firing, and how often relative to accepted volume. 'Quality dropped' is not actionable; 'the fuel_level_range rule is firing on 4% of records' is.",
+      "datasource": { "type": "trino-datasource", "uid": "fleetstream-trino" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 35 },
+      "fieldConfig": { "defaults": { "custom": { "align": "auto" } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 1,
+          "rawSQL": "SELECT report_date, rule_name, rule_severity, violation_count, rejected_event_count, accepted_event_count, rejection_rate_pct FROM iceberg.gold.data_quality_summary ORDER BY report_date DESC, violation_count DESC LIMIT 50"
+        }
+      ]
+    }
+  ]
+}

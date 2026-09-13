@@ -1,0 +1,56 @@
+[project]
+name = "fleetstream"
+version = "0.1.0"
+description = "Real-time fleet intelligence platform: Kafka, Spark Structured Streaming, Iceberg, dbt"
+requires-python = ">=3.10"
+
+# Runtime dependencies for code that runs on the HOST (the simulator/producer) and
+# inside the Spark containers. PySpark is deliberately absent: it is provided by the
+# Spark image, and the host interpreter here is 3.13, which PySpark 3.5 does not target.
+dependencies = [
+    "confluent-kafka>=2.15.0",
+    "PyYAML>=6.0.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.9",
+    "mypy>=1.14",
+    "types-PyYAML",
+]
+
+[project.scripts]
+fleetstream-simulate = "fleetstream.simulator.producer:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+fleetstream = ["quality/*.yml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "integration: requires the Spark container and a running stack (deselect with -m 'not integration')",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src"]
+ignore_missing_imports = true
+warn_unused_ignores = true

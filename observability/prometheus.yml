@@ -1,0 +1,82 @@
+# Prometheus scrape configuration.
+#
+# Three sources, each answering a different operational question:
+#
+#   kafka-exporter  - is the pipeline keeping up? (consumer lag per partition)
+#   spark drivers   - is processing healthy? (batch duration, input vs process rate)
+#   trino           - is the serving layer healthy? (query queue, failures)
+#
+# Consumer lag is the metric to watch first. Lag that grows monotonically means
+# arrival rate exceeds processing rate, and every other symptom follows from that.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    platform: fleetstream
+    environment: local
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Kafka consumer lag, per group and per partition. The hot vehicle makes one
+  # partition visibly deeper than the rest, which is the point of the demonstration.
+  - job_name: kafka
+    static_configs:
+      - targets: ['kafka-exporter:9308']
+        labels:
+          component: kafka
+
+  # Spark exposes metrics through PrometheusServlet on each driver's UI port
+  # (configured in docker/spark/metrics.properties). Each streaming query runs its
+  # own driver, so each is scraped separately - which is what makes it possible to
+  # tell WHICH query is slow rather than just that something is.
+  - job_name: spark-bronze
+    metrics_path: /metrics/prometheus
+    static_configs:
+      - targets: ['bronze-ingest:4040']
+        labels:
+          component: spark
+          query: bronze-ingest
+
+  - job_name: spark-silver
+    metrics_path: /metrics/prometheus
+    static_configs:
+      - targets: ['silver-transform:4041']
+        labels:
+          component: spark
+          query: silver-transform
+
+  - job_name: spark-incidents
+    metrics_path: /metrics/prometheus
+    static_configs:
+      - targets: ['incident-detector:4042']
+        labels:
+          component: spark
+          query: incident-detector
+
+  - job_name: spark-master
+    metrics_path: /metrics/master/prometheus
+    static_configs:
+      - targets: ['spark-master:8080']
+        labels:
+          component: spark
+          query: master
+
+  - job_name: trino
+    metrics_path: /metrics
+    # Trino identifies every caller, even with authentication disabled, and returns
+    # 401 without this header. Prometheus sends it as a static header rather than
+    # through basic_auth, because Trino wants the user in X-Trino-User specifically.
+    http_headers:
+      X-Trino-User:
+        values: ['fleetstream']
+    static_configs:
+      - targets: ['trino:8080']
+        labels:
+          component: trino

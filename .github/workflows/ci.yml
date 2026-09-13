@@ -1,0 +1,197 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push makes an in-flight run redundant; cancelling frees runners and keeps
+# feedback fast, which is the only thing that makes CI worth waiting for.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Fast feedback: lint and unit tests, no containers.
+  # ---------------------------------------------------------------------------
+  python:
+    name: Lint and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Ruff
+        run: |
+          ruff check src tests
+          ruff format --check src tests
+
+      - name: Mypy
+        run: mypy src
+
+      # These need no Spark: the application modules import PySpark lazily precisely
+      # so the contract, the rule engine and the simulator stay testable without a JVM.
+      - name: Unit tests
+        run: pytest tests/unit -v --cov=fleetstream --cov-report=term-missing
+
+  # ---------------------------------------------------------------------------
+  # dbt: parse and compile without a warehouse.
+  # ---------------------------------------------------------------------------
+  dbt:
+    name: dbt parse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dbt
+        run: pip install "dbt-core==1.12.4" "dbt-trino==1.10.3"
+
+      - name: dbt deps
+        working-directory: dbt/fleetstream
+        run: dbt deps
+
+      # `parse` resolves every ref(), source() and macro and builds the DAG. It
+      # catches a renamed model or a typo'd column reference in seconds, without
+      # needing a Trino cluster. Actually running the models is what the local
+      # `make verify` path does.
+      - name: dbt parse
+        working-directory: dbt/fleetstream
+        env:
+          DBT_PROFILES_DIR: ${{ github.workspace }}/dbt/fleetstream
+        run: dbt parse --no-partial-parse
+
+  # ---------------------------------------------------------------------------
+  # Terraform: format, init and validate. Never plan or apply - there is no account.
+  # ---------------------------------------------------------------------------
+  terraform:
+    name: Terraform validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.3"
+
+      - name: Format
+        run: terraform fmt -check -recursive terraform
+
+      # -backend=false is what lets this run with no credentials and no state
+      # bucket. It validates syntax, references, types and provider arguments -
+      # everything short of what an apply would reveal.
+      - name: Init
+        working-directory: terraform/envs/dev
+        run: terraform init -backend=false -input=false
+
+      - name: Validate
+        working-directory: terraform/envs/dev
+        run: terraform validate -no-color
+
+  # ---------------------------------------------------------------------------
+  # Container builds. Catches a broken Dockerfile before anyone runs the stack.
+  # ---------------------------------------------------------------------------
+  images:
+    name: Build images
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - {name: spark, dockerfile: docker/spark/Dockerfile}
+          - {name: simulator, dockerfile: docker/simulator/Dockerfile}
+          - {name: dbt, dockerfile: docker/dbt/Dockerfile}
+          - {name: iceberg-rest, dockerfile: docker/iceberg-rest/Dockerfile}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.image.name }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.image.dockerfile }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.image.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}
+
+  # ---------------------------------------------------------------------------
+  # Compose files must actually resolve, including profiles and variable defaults.
+  # ---------------------------------------------------------------------------
+  compose:
+    name: Validate compose
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create .env
+        run: cp .env.example .env
+
+      # `config` renders the merged file with all overlays and interpolations. A
+      # missing variable or a bad merge key fails here rather than half way through
+      # someone's first `make demo`.
+      - name: Render merged configuration
+        run: |
+          docker compose \
+            -f compose/docker-compose.yml \
+            -f compose/compose.spark.yml \
+            -f compose/compose.serving.yml \
+            -f compose/compose.orchestration.yml \
+            config --quiet
+
+  # ---------------------------------------------------------------------------
+  # Airflow DAGs must import. A DAG that fails to parse never runs and shows up
+  # only as a silent gap in the scheduler.
+  # ---------------------------------------------------------------------------
+  airflow:
+    name: DAG import check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install Airflow
+        run: |
+          pip install "apache-airflow==3.3.1" "apache-airflow-providers-docker" \
+            --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-3.3.1/constraints-${{ env.PYTHON_VERSION }}.txt"
+
+      - name: Import DAGs
+        env:
+          AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+          AIRFLOW__CORE__DAGS_FOLDER: ${{ github.workspace }}/airflow/dags
+          AIRFLOW_HOME: ${{ github.workspace }}/.airflow
+        run: |
+          python - <<'PY'
+          from airflow.models import DagBag
+          # Airflow 3.3 removed the include_examples argument; examples are excluded
+          # by AIRFLOW__CORE__LOAD_EXAMPLES above instead.
+          bag = DagBag("airflow/dags")
+          if bag.import_errors:
+              for path, err in bag.import_errors.items():
+                  print(f"::error file={path}::{err}")
+              raise SystemExit(1)
+          print(f"{len(bag.dags)} DAG(s) imported: {sorted(bag.dags)}")
+          PY

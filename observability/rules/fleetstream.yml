@@ -1,0 +1,114 @@
+# Alerting rules.
+#
+# Each alert is written against a symptom an operator can act on, not against a raw
+# number. "Lag is 40,000" is not actionable on its own - a backlog after a restart is
+# normal and drains by itself. "Lag has been growing for 10 minutes" means processing
+# is genuinely slower than arrival, and someone has to intervene.
+
+groups:
+  - name: fleetstream-ingestion
+    interval: 30s
+    rules:
+      - alert: KafkaConsumerLagGrowing
+        # The derivative, not the absolute value: a large but shrinking backlog is a
+        # system recovering correctly, and paging on it trains people to ignore pages.
+        expr: deriv(kafka_consumergroup_lag[10m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+          component: kafka
+        annotations:
+          summary: "Consumer lag is growing for group {{ $labels.consumergroup }}"
+          description: >-
+            Lag on topic {{ $labels.topic }} partition {{ $labels.partition }} has
+            been increasing for 10 minutes, so arrival rate exceeds processing rate.
+            Check Spark batch duration first, then look for partition skew before
+            adding parallelism - more executors will not help a single hot partition.
+
+      - alert: KafkaConsumerLagCritical
+        expr: kafka_consumergroup_lag > 500000
+        for: 15m
+        labels:
+          severity: critical
+          component: kafka
+        annotations:
+          summary: "Consumer lag above 500k on {{ $labels.topic }}"
+          description: >-
+            The backlog is large enough that recovery will take a long time even once
+            throughput is restored. Consider raising maxOffsetsPerTrigger only after
+            confirming the bottleneck is not the sink.
+
+      - alert: KafkaPartitionSkew
+        # One partition holding a large share of the backlog is the signature of a
+        # hot key, which no amount of extra consumers will fix.
+        expr: >-
+          max by (topic) (kafka_consumergroup_lag)
+          > 5 * avg by (topic) (kafka_consumergroup_lag)
+        for: 15m
+        labels:
+          severity: warning
+          component: kafka
+        annotations:
+          summary: "Partition skew on {{ $labels.topic }}"
+          description: >-
+            One partition carries more than five times the average lag. This is a hot
+            partition key, not a capacity problem: adding consumers cannot help,
+            because a partition is only ever consumed by one member of a group.
+
+      - alert: NoTelemetryArriving
+        expr: sum(rate(kafka_topic_partition_current_offset{topic="fleet.telemetry"}[5m])) == 0
+        for: 10m
+        labels:
+          severity: critical
+          component: kafka
+        annotations:
+          summary: "No telemetry has arrived for 10 minutes"
+          description: >-
+            The producer has stopped or lost connectivity. Silence looks identical to
+            a healthy idle system on most dashboards, which is why it is alerted on.
+
+  - name: fleetstream-processing
+    interval: 30s
+    rules:
+      - alert: SparkBatchDurationExceedsTrigger
+        # A batch that takes longer than its trigger interval can never catch up:
+        # the next batch is already due before this one finished.
+        expr: >-
+          spark_streaming_query_lastExecution_duration_seconds > 30
+        for: 10m
+        labels:
+          severity: warning
+          component: spark
+        annotations:
+          summary: "Spark batches on {{ $labels.query }} exceed the trigger interval"
+          description: >-
+            Processing time per micro-batch has exceeded the trigger interval, so the
+            query is falling behind by construction. Check for skew and shuffle spill
+            before scaling out.
+
+      - alert: SparkStreamingQueryDown
+        expr: up{component="spark"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: spark
+        annotations:
+          summary: "Spark query {{ $labels.query }} is not reporting metrics"
+          description: >-
+            The driver is unreachable. The query has most likely died; check whether
+            it is restarting in a loop before restarting it again.
+
+  - name: fleetstream-serving
+    interval: 30s
+    rules:
+      - alert: TrinoDown
+        expr: up{component="trino"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: trino
+        annotations:
+          summary: "Trino is unreachable"
+          description: >-
+            The serving layer is down. Ingestion and the lake are unaffected - data
+            continues to land - but dashboards and dbt runs will fail.

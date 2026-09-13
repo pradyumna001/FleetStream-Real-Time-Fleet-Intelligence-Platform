@@ -1,0 +1,167 @@
+# FleetStream data-quality rules.
+#
+# Declarative on purpose. The same rules are applied by the Silver streaming job and
+# by the Airflow batch validation task; if they were expressed as Python or SQL in
+# each place, the two would drift and "the batch job disagrees with the stream" would
+# become a recurring, unfalsifiable bug report.
+#
+# EXPRESSION SEMANTICS
+#   Each expression is a Spark SQL predicate that is TRUE for a good record.
+#   A record is quarantined when the expression is NOT TRUE - false *or* null.
+#   Because SQL comparisons against NULL yield NULL, every rule on an optional field
+#   must permit null explicitly ("x IS NULL OR ..."), otherwise a legitimately absent
+#   reading would be rejected. Required fields get their own not-null rule instead.
+#
+# SEVERITY
+#   critical - the record is unusable; it goes to quarantine.
+#   warning  - recorded on the row but the record still flows to Silver.
+#
+# Each rule names the simulator corruption it is meant to catch, so a rule that stops
+# working shows up as that corruption's quarantine count going to zero rather than as
+# an unattributable shortfall.
+
+version: 1
+
+rules:
+  # -- completeness: required identifiers and the event-time anchor ------------
+  - name: vehicle_id_not_null
+    severity: critical
+    dimension: completeness
+    expression: "vehicle_id IS NOT NULL AND length(trim(vehicle_id)) > 0"
+    description: >-
+      Telemetry that cannot be attributed to a vehicle cannot be joined, aggregated
+      or acted on. Catches the null_vehicle_id corruption.
+
+  - name: event_id_not_null
+    severity: critical
+    dimension: completeness
+    expression: "event_id IS NOT NULL AND length(trim(event_id)) > 0"
+    description: >-
+      event_id is the idempotency key for the whole platform. Without it a record
+      cannot be deduplicated or merged, so it must never reach Silver.
+
+  - name: event_time_not_null
+    severity: critical
+    dimension: completeness
+    expression: "event_time IS NOT NULL"
+    description: >-
+      event_time drives watermarking and every date partition. A null makes the
+      record untimeable. Catches the missing_event_time corruption.
+
+  - name: trip_id_not_null
+    severity: critical
+    dimension: completeness
+    expression: "trip_id IS NOT NULL AND length(trim(trip_id)) > 0"
+    description: Trip attribution is required for trip-grain facts.
+
+  # -- type validity ----------------------------------------------------------
+  # A JSON value that is present but not coercible to the target type is silently
+  # nulled by from_json in PERMISSIVE mode. Comparing the raw payload against the
+  # parsed column is what turns that silent loss into a reportable rejection.
+  - name: speed_type_valid
+    severity: critical
+    dimension: validity
+    expression: >-
+      get_json_object(raw_payload, '$.speed') IS NULL OR speed IS NOT NULL
+    description: >-
+      The payload carried a speed that could not be parsed as a number. Catches the
+      unparseable_speed corruption, which would otherwise vanish as a null.
+
+  - name: fuel_level_type_valid
+    severity: critical
+    dimension: validity
+    expression: >-
+      get_json_object(raw_payload, '$.fuel_level') IS NULL OR fuel_level IS NOT NULL
+    description: A present but uncoercible fuel_level must be reported, not nulled.
+
+  - name: engine_temperature_type_valid
+    severity: critical
+    dimension: validity
+    expression: >-
+      get_json_object(raw_payload, '$.engine_temperature') IS NULL
+      OR engine_temperature IS NOT NULL
+    description: A present but uncoercible engine_temperature must be reported.
+
+  # -- ranges -----------------------------------------------------------------
+  - name: speed_non_negative
+    severity: critical
+    dimension: validity
+    expression: "speed IS NULL OR speed >= 0"
+    description: Negative ground speed is physically impossible. Catches negative_speed.
+
+  - name: speed_within_plausible_max
+    severity: critical
+    dimension: validity
+    expression: "speed IS NULL OR speed <= 200"
+    description: >-
+      No vehicle in this fleet exceeds 200 km/h. Set well above the fastest
+      legitimate overspeed so genuine speeding is analysed, not quarantined.
+
+  - name: fuel_level_range
+    severity: critical
+    dimension: validity
+    expression: "fuel_level IS NULL OR (fuel_level >= 0 AND fuel_level <= 100)"
+    description: Fuel level is a percentage. Catches fuel_out_of_range.
+
+  - name: battery_level_range
+    severity: critical
+    dimension: validity
+    expression: "battery_level IS NULL OR (battery_level >= 0 AND battery_level <= 100)"
+    description: Battery level is a percentage. Catches battery_out_of_range.
+
+  - name: engine_temperature_range
+    severity: critical
+    dimension: validity
+    expression: >-
+      engine_temperature IS NULL OR (engine_temperature >= -50 AND engine_temperature <= 200)
+    description: >-
+      Beyond this range the sensor is faulty rather than the engine extraordinary.
+      The upper bound sits above the overheating threshold so real overheating
+      incidents are kept and analysed. Catches absurd_engine_temperature.
+
+  - name: latitude_range
+    severity: critical
+    dimension: validity
+    expression: "latitude IS NULL OR (latitude >= -90 AND latitude <= 90)"
+    description: Valid WGS84 latitude. Catches latitude_out_of_range.
+
+  - name: longitude_range
+    severity: critical
+    dimension: validity
+    expression: "longitude IS NULL OR (longitude >= -180 AND longitude <= 180)"
+    description: Valid WGS84 longitude. Catches longitude_out_of_range.
+
+  - name: odometer_non_negative
+    severity: critical
+    dimension: validity
+    expression: "odometer_km IS NULL OR odometer_km >= 0"
+    description: A lifetime distance cannot be negative.
+
+  # -- consistency ------------------------------------------------------------
+  - name: event_time_not_in_future
+    severity: critical
+    dimension: consistency
+    expression: >-
+      event_time IS NULL OR event_time <= current_timestamp() + INTERVAL 1 DAY
+    description: >-
+      Guards against a misconfigured vehicle clock. One day of tolerance absorbs
+      timezone and skew mistakes without admitting records dated years ahead, which
+      would push the watermark forward and cause real events to be dropped as late.
+
+  - name: event_time_not_ancient
+    severity: critical
+    dimension: consistency
+    expression: >-
+      event_time IS NULL OR event_time >= timestamp'2020-01-01 00:00:00'
+    description: >-
+      Predates the fleet. Usually an epoch-zero default from a device that failed
+      to acquire time.
+
+  - name: schema_version_known
+    severity: warning
+    dimension: consistency
+    expression: "schema_version IS NULL OR schema_version IN ('1.0')"
+    description: >-
+      An unrecognised contract version. A warning rather than critical: the record
+      is probably still usable, and rejecting it outright would turn a producer
+      rollout into an outage. It is surfaced so the mismatch is noticed.

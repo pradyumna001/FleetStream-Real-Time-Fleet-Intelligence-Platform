@@ -1,0 +1,99 @@
+# Serving and observability.  Profile: serve
+#
+# Trino is the query engine (the Athena stand-in) and Grafana is used for BOTH the
+# platform health dashboards and the business dashboards. One tool for both is a
+# deliberate choice: adding a separate BI stack would add gigabytes of containers to
+# demonstrate a capability Grafana already covers over a SQL datasource.
+
+name: fleetstream
+
+services:
+  trino:
+    image: trinodb/trino:483
+    container_name: fleetstream-trino
+    depends_on:
+      iceberg-rest:
+        condition: service_healthy
+    ports:
+      # 8090 on the host: 8080 is taken by the Spark master UI.
+      - "8090:8080"
+    volumes:
+      - ../docker/trino/etc:/etc/trino:ro
+      - trino-data:/data/trino
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/v1/info"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 45s
+    profiles: [serve]
+    networks: [fleetstream]
+
+  # Consumer lag straight from the Kafka protocol. Simpler and more direct than a
+  # JMX exporter agent: lag per consumer group per partition is the single most
+  # useful streaming health metric, and this reports it without touching the broker.
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.9.0
+    container_name: fleetstream-kafka-exporter
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command:
+      - --kafka.server=kafka:29092
+      - --web.listen-address=:9308
+    ports:
+      - "9308:9308"
+    profiles: [serve]
+    networks: [fleetstream]
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: fleetstream-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Short retention: this is a demo stack, not a long-term metrics store.
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ../observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../observability/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    profiles: [serve]
+    networks: [fleetstream]
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    container_name: fleetstream-grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-fleetstream}
+      # Anonymous viewing: this is a local demo and a login prompt between the user
+      # and the dashboards adds friction without adding safety.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_DEFAULT_THEME: dark
+      # The Trino datasource plugin is not bundled with Grafana.
+      GF_INSTALL_PLUGINS: trino-datasource
+      GF_FEATURE_TOGGLES_ENABLE: publicDashboards
+    volumes:
+      - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    profiles: [serve]
+    networks: [fleetstream]
+
+volumes:
+  trino-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  fleetstream:
+    name: fleetstream

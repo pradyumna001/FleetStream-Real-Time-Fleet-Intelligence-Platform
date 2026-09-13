@@ -1,0 +1,58 @@
+name: fleetstream
+version: "1.0.0"
+config-version: 2
+
+profile: fleetstream
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+vars:
+  # ---------------------------------------------------------------------------
+  # Late-arriving data window.
+  #
+  # Incremental models cannot simply process "everything newer than last time".
+  # An event generated yesterday but delivered today has an event_time that is
+  # already older than the last high-water mark, so a naive filter would skip it
+  # forever and yesterday's totals would be permanently short.
+  #
+  # So every incremental model reprocesses a trailing window and MERGEs the result.
+  # Reprocessing is safe precisely because the merge is keyed on a deterministic
+  # surrogate key: re-running a day updates its rows rather than duplicating them.
+  #
+  # Two days covers the simulator's injected lateness (5-20 minutes) with a very
+  # wide margin. In production this should be set from the measured p99 of
+  # (ingestion_time - event_time), not from a guess, and revisited when that shifts.
+  # ---------------------------------------------------------------------------
+  lookback_days: 2
+
+  # Business thresholds. Defined once here rather than repeated as literals across
+  # models, so "what counts as overheating" has exactly one answer.
+  overheat_threshold_c: 100
+  critical_overheat_threshold_c: 115
+  low_fuel_threshold_pct: 15
+  severe_overspeed_kmh: 140
+  # A trip needs enough readings to compute meaningful duration and distance.
+  min_events_per_trip: 5
+
+models:
+  fleetstream:
+    +materialized: view
+    staging:
+      +schema: staging
+      +materialized: view
+    intermediate:
+      +schema: intermediate
+      +materialized: view
+    marts:
+      +schema: gold
+      +materialized: table
+    gold:
+      +schema: gold
+      +materialized: view

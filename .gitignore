@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environment
+.env
+!.env.example
+
+# dbt
+dbt/fleetstream/target/
+dbt/fleetstream/dbt_packages/
+dbt/fleetstream/logs/
+.user.yml
+
+# Airflow
+airflow/logs/
+airflow/plugins/__pycache__/
+airflow-webserver.pid
+standalone_admin_password.txt
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform.lock.hcl
+crash.log
+
+# Spark / local data
+spark-warehouse/
+derby.log
+metastore_db/
+data/
+*.crc
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
